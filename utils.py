@@ -4,6 +4,8 @@ import aioredis
 import asyncio
 import uvloop
 import redis
+import opentracing
+from opentracing.ext import tags
 from functools import wraps
 from sanic.response import json
 from config import TOKEN
@@ -95,3 +97,21 @@ def rpush_redis(msg_list):
         log('error', str(e))
 
 
+def before_request(request):
+    try:
+        span_context = opentracing.tracer.extract(
+            format=opentracing.Format.HTTP_HEADERS,
+            carrier=request.headers
+        )
+    except Exception as e:
+        span_context = None
+    handler = request.app.router.get(request)
+    span = opentracing.tracer.start_span(operation_name=handler[0].__name__,
+                             child_of=span_context)
+    span.log_kv({'event': 'server'})
+    span.set_tag('http.url', request.url)
+    span.set_tag('http.method', request.method)
+    ip = request.ip
+    if ip:
+        span.set_tag(tags.PEER_HOST_IPV4, "{}:{}".format(ip[0], ip[1]))
+    return span
