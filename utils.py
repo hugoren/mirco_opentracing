@@ -1,17 +1,20 @@
 import logging
-import time
-import aioredis
 import asyncio
-import uvloop
-import redis
 import opentracing
-from opentracing.ext import tags
 from functools import wraps
 from sanic.response import json
 from config import TOKEN
-from config import REDIS_HOST, REDIS_PORT, REDIS_DB
 from logging.handlers import RotatingFileHandler
 
+
+from sanic.handlers import ErrorHandler
+from opentracing.ext import tags
+from execption import CustomException
+
+logger = logging.getLogger('sanic')
+_log = logging.getLogger('zipkin')
+
+PAGE_COUNT = 20
 
 def log(level, message):
 
@@ -41,7 +44,7 @@ def auth(token):
         async def auth_token(req, *arg, **kwargs):
             try:
                 value = req.headers.get(token)
-                if value and TOKEN == value:
+                if value and TOKEN != value:
                     r = await func(req, *arg, **kwargs)
                     return json({'retcode': 0, 'stdout': r})
                 else:
@@ -53,49 +56,105 @@ def auth(token):
     return wrapper
 
 
-def timethis(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start = time.perf_counter()
-        r = func(*args, **kwargs)
-        end = time.perf_counter()
-        print('{}.{} : {}'.format(func.__module__, func.__name__, end - start))
-        return r
-    return wrapper
+def jsonify(records):
+    """
+    Parse asyncpg record response into JSON format
+    """
+    return [dict(r.items()) for r in records]
 
+async def async_request(calls):
+    results = await asyncio.gather(*[ call[2] for call in calls])
+    for index, obj in enumerate(results):
+        call = calls[index]
+        call[0][call[1]] = results[index]
 
-async def producer_redis(loop, message):
+async def async_execute(*calls):
+    results = await asyncio.gather(*calls)
+    return tuple(results)
 
-    start_time = time.time()
-    redis = await aioredis.create_redis_pool(
-        'redis://127.0.0.1:6379', db=0, loop=loop)
-    await redis.rpush('log-message', message)
-    redis.close()
-    await redis.wait_closed()
-    print(time.time() - start_time)
+def id_to_hex(id):
+    if id is None:
+        return None
+    return '{0:x}'.format(id)
 
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-loop = uvloop.new_event_loop()
+async def consume(q, zs):
+    async with aiohttp.ClientSession() as session:
+        while True:
+            # wait for an item from the producer
+            try:
+                span = await q.get()
+                annotations = []
+                binary_annotations = []
+                annotation_filter = set()
+                service_name = span.tags.pop('component') if 'component' in span.tags else None
+                endpoint = {'serviceName': service_name if service_name else 'service'}
+                if span.tags:
+                    for k, v in span.tags.items():
+                        binary_annotations.append({
+                            'endpoint': endpoint,
+                            'key': k,
+                            'value': v
+                        })
+                for log in span.logs:
+                    event = log.key_values.get('event') or ''
+                    payload = log.key_values.get('payload')
+                    an = []
+                    start_time = int(span.start_time*1000000)
+                    duration = int(span.duration*1000000)
+                    if event == 'client':
+                        an = {'cs': start_time,
+                            'cr': start_time + duration}
+                    elif event == 'server':
+                        an = {'sr': start_time,
+                            'ss': start_time + duration}
+                    else:
+                        binary_annotations["%s@%s" % (event, str(log.timestamp))] = payload
+                    for k, v in an.items():
+                        annotations.append({
+                            'endpoint': endpoint,
+                            'timestamp': v,
+                            'value': k
+                        })
+                span_record = create_span(
+                    id_to_hex(span.context.span_id),
+                    id_to_hex(span.parent_id),
+                    id_to_hex(span.context.trace_id),
+                    span.operation_name,
+                    start_time,
+                    duration,
+                    annotations,
+                    binary_annotations,
+                )
+                if zs:
+                    async with session.post(zs, json=[span_record]) as res:
+                        logger.info(await res.text())
+                _log.info("{} span".format(service_name), span_record)
+                q.task_done()
+            except RuntimeError as e:
+                logger.errro(e)
+                break
+            except Exception as e:
+                logger.error("{}".format(e))
+                raise e
+            finally:
+                pass
 
+class CustomHandler(ErrorHandler):
 
-def rpush_redis(msg_list):
-    try:
-        start_time = time.time()
-        pool = redis.ConnectionPool(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, max_connections=10)
-        r = redis.StrictRedis(connection_pool=pool)
-        [r.rpush("log-msg", i) for i in msg_list]
-        print(time.time() - start_time)
-        # async def test():
-        #     print(1)
-        #     redis = await aioredis.create_redis_pool(
-        #         'redis://127.0.0.1:6379', db=0, loop=loop)
-        #     await redis.rpush('log-msg', msg)
-        #     redis.close()
-        #     await redis.wait_closed()
-        # loop.run_until_complete(test())
-    except Exception as e:
-        log('error', str(e))
-
+    def default(self, request, exception):
+        if isinstance(exception, CustomException):
+            data = {
+                'message': exception.message,
+                'code': exception.code,
+            }
+            if exception.error:
+                data.update({'error': exception.error})
+            span = request['span']
+            span.set_tag('http.status_code', str(exception.status_code))
+            span.set_tag('error.kind', exception.__class__.__name__)
+            span.set_tag('error.msg', exception.message)
+            return json(data, status=exception.status_code)
+        return super().default(request, exception)
 
 def before_request(request):
     try:
@@ -115,3 +174,22 @@ def before_request(request):
     if ip:
         span.set_tag(tags.PEER_HOST_IPV4, "{}:{}".format(ip[0], ip[1]))
     return span
+
+def create_span(span_id, parent_span_id, trace_id, span_name,
+                start_time, duration, annotations,
+                binary_annotations):
+    span_dict = {
+        'traceId': trace_id,
+        'name': span_name,
+        'id': span_id,
+        'parentId': parent_span_id,
+        'timestamp': start_time,
+        'duration': duration,
+        'annotations': annotations,
+        'binaryAnnotations': binary_annotations
+    }
+    return span_dict
+
+
+
+
