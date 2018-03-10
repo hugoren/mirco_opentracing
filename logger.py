@@ -1,9 +1,7 @@
-import os
 import sys
 import logging
 import opentracing
 import datetime
-import aiohttp
 import time
 import json
 import traceback as tb
@@ -14,7 +12,6 @@ import socket
 from sanic.request import Request
 from basictracer.recorder import SpanRecorder
 
-from sanicms import utils
 
 STANDARD_ANNOTATIONS = {
     'client': {'cs':[], 'cr':[]},

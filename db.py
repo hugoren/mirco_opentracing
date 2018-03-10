@@ -1,14 +1,12 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 import logging
 import opentracing
 
 from asyncpg import create_pool
-from sanicms.utils import jsonify
+from utils import jsonify
 
 
 logger = logging.getLogger('sanic')
+
 
 class BaseConnection(object):
     def __init__(self, pool, span=None, conn=None):
@@ -23,7 +21,7 @@ class BaseConnection(object):
     def before(self, name, query, *args):
         if self._span:
             span = opentracing.tracer.start_span(operation_name=name, child_of=self._span)
-            span.log_kv({ 'event': 'client'})
+            span.log_kv({'event': 'client'})
             span.set_tag('component', 'db-execute')
             span.set_tag('db.type', 'sql')
             span.set_tag('db.sql', query)
@@ -126,12 +124,6 @@ class TransactionConnection(BaseConnection):
 
 
 class ConnectionPool(object):
-    PGHOST = None
-    PGUSER = None
-    PGPASSWORD = None
-    PGPORT = None
-    PGDATABASE = None
-    pool = None
 
     def __init__(self, loop=None):
         self.conn = None

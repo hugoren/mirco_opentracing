@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import opentracing
+import aiohttp
 from functools import wraps
 from sanic.response import json
 from config import TOKEN
