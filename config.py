@@ -6,11 +6,11 @@ import os
 Basic config
 """
 DB_CONFIG = {
-    'host':  os.environ.get('POSTGRES_SERVICE_HOST', 'localhost'),
-    'user': os.environ.get('POSTGRES_SERVICE_USER', 'postgres'),
-    'password': os.environ.get('POSTGRES_SERVICE_PASSWORD', None),
-    'port': os.environ.get('POSTGRES_SERVICE_PORT', 5432),
-    'database': os.environ.get('POSTGRES_SERVICE_DB_NAME', 'postgres')
+    'host':  "127.0.0.1",
+    'user': "root",
+    'password': "hugo9091",
+    'port': 3306,
+    'database': "micro_opentracing"
 }
 
 ZIPKIN_SERVER = os.environ.get('ZIPKIN_SERVER', None)
